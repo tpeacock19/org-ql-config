@@ -1,0 +1,362 @@
+#+title: Org-ql Config
+#+PROPERTY: header-args :tangle no
+
+* Introduction
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 00:42]
+:END:
+
+A recent post on reddit asked the question, [[https://old.reddit.com/r/orgmode/comments/jysnrf/why_does_the_recent_zettelkasten_craze_use_one/][Why does the recent zettelkasten craze use one file per note rather than one headline per note?]] Naturally, it brought many differing perspectives and approaches to org-mode usage. I wanted to show my own configuration that largely leverages alphapapa's wonderful package [[https://github.com/alphapapa/org-ql][org-ql]]. Along with some built-in functionality of org-mode I'm able to search headlines across all of my org files and visit them in indirect buffers automatically. Additionally, you can search backlinks with similar functionality.
+
+This is not meant to be a standalone package by any means, but simply an example of what can be achieved using org-ql. My personal emacs configuration is named baal, so you can safely ignore or rename any references to it.
+
+* Requirements
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 00:41]
+:END:
+
+As mentioned earlier this configuration is mainly built off of `org-ql`; However, I also use [[https://github.com/raxod502/selectrum][selectrum]] (similar completion framework to ivy/helm) as well as [[https://github.com/raxod502/prescient.el][prescient.el]]. Selectrum is completion of choice because of its simplicity. It has forced me to learn more about elisp in order to build functionailty that I need. In the context of this configuration, prescient.el is probably more important. I only use it for sorting candidates in the minibuffer, but it provides a poor man's emulation of recently visited headlines.
+
+#+begin_src emacs-lisp
+(require 'org-ql)
+(require 'org-ql-view)
+;; optional
+(require 'selectrum)
+(require 'prescient)
+#+end_src
+
+* Indirect Buffers
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 08:26]
+:END:
+
+I borrowed yet another function from alphapapa in his simpler =org-tree-to-indirect-buffer=. However, I slightly modified it to better title buffers that are created from headlines that include org-links.
+
+#+begin_src emacs-lisp :tangle yes
+(defun ap/org-tree-to-indirect-buffer (&optional arg)
+    "Create indirect buffer and narrow it to current subtree.
+The buffer is named after the subtree heading, with the filename
+appended.  If a buffer by that name already exists, it is
+selected instead of creating a new buffer."
+    (interactive "P")
+    (let* ((new-buffer-p)
+           (pos (point))
+           (buffer-name (concat (org-link-display-format (nth 4 (org-heading-components)))
+                                "::" (file-name-nondirectory (buffer-file-name (buffer-base-buffer)))))
+           (new-buffer (or (get-buffer buffer-name)
+                           (prog1 (condition-case nil
+                                      (make-indirect-buffer (current-buffer) buffer-name 'clone)
+                                    (error (make-indirect-buffer (current-buffer) buffer-name)))
+                             (setq new-buffer-p t)))))
+      (if arg
+          (pop-to-buffer new-buffer)
+        (switch-to-buffer new-buffer))
+      (when new-buffer-p
+        ;; I don't understand why setting the point again is necessary, but it is.
+        (goto-char pos)
+        (org-narrow-to-subtree))))
+
+(advice-add 'org-tree-to-indirect-buffer :override 'ap/org-tree-to-indirect-buffer)
+#+end_src
+
+Further, I've created a set of functions that set up an indirect buffer to display the relevant entry and its children. It also attempts to keep the window's buffer history consistent by placing new base buffers at the end of =window-prev-buffers=. I've added this to =org-agenda-after-show-hook= so these functions take effect when visitng headlines from =org-agenda= or =org-ql-views=.
+
+#+begin_src emacs-lisp
+(defun baal-org-post-follow-hooks (&optional base-buff)
+  "Format buffer after visiting headline.
+If visiting headline in a new buffer place BASE-BUFF bottom of the prev-buffer
+list."
+  (when (eq major-mode 'org-mode)
+    (org-tree-to-indirect-buffer)
+    (org-show-entry)
+    (org-show-children)
+    (unless (equal base-buff (caar (window-prev-buffers)))
+      ;; The selected heading was in a different buffer.  Put the
+      ;; non-indirect buffer at the bottom of the prev-buffers list
+      ;; so it won't be selected when the indirect buffer is killed.
+      (set-window-prev-buffers nil (append (cdr (window-prev-buffers))
+                                           (list (car (window-prev-buffers))))))))
+
+(add-hook 'org-agenda-after-show-hook #'baal-org-post-follow-hooks)
+#+end_src
+
+* Org-ql searches
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 00:41]
+:END:
+
+Simple function for finding all org files in a directory. Used for some of the org-ql searches. I currently use fd, but have included a version for the more common find.
+#+begin_src emacs-lisp
+;; using find
+(defun baal--find-files-in-dir (ext dir &optional rec)
+  "Find files with EXT in DIR.
+REC searches recursively."
+  (split-string (shell-command-to-string
+                 (concat
+                  (format "find %s " dir ext)
+                  (unless rec "-maxdepth 1 ")
+                  (format "-name \"*.%s\"" ext)))))
+
+;; usind fd
+(defun baal--find-files-in-dir (ext dir &optional rec)
+  "Find files with EXT in DIR.
+REC searches recursively."
+  (split-string (shell-command-to-string
+                 (concat
+                  (format "fd --type f -e %s " ext)
+                  (unless rec "-d 1 ")
+                  (format ". %s" dir)))))
+#+end_src
+
+
+I've made some convience functions for some common searches across my org files. I only have one notes file but this could very well be modified to refer to a notes directory.
+
+#+begin_src emacs-lisp
+(defun baal-org-ql--search (file &optional query)
+  "An Org-ql search allowing for the target FILE to be specified.
+Additionally, QUERY can be chosen as well."
+  (let ((target file)
+        (query (or query (read-from-minibuffer "Query: "))))
+    (funcall #'org-ql-search target query)))
+
+(defun baal-org-ql-search-agenda (&optional query)
+  "Quickly search `org-agenda-files' with optional QUERY."
+  (interactive)
+  (baal-org-ql--search (org-agenda-files) query))
+
+(defun baal-org-ql-search-notes (&optional query)
+  "Quickly search `org-agenda-files' with optional QUERY."
+  (interactive)
+  (baal-org-ql--search "~/org/notes.org" query))
+
+(defun baal-org-ql-search-journal (&optional query)
+  "Quickly search `baal-journal-directory' with optional QUERY."
+  (interactive)
+  (baal-org-ql--search (baal--find-files-in-dir 'org "~/org/journal/") query))
+#+end_src
+
+* Headlines
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 01:29]
+:END:
+
+** Formatting Candidates
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 00:41]
+:END:
+
+Now we are getting to the interesting parts. This first function modifies org-ql's original formatting of entries for an org-ql-view. It prepend's the headline's file name and appends the headline's outline path. This allows you to view a good amount of information when searching for headlines in the minibuffer.
+
+#+begin_src emacs-lisp
+(defun baal-org-ql--format-element (line)
+  "Format org heading LINE derived from org-ql-views.
+Adding file name and outline path for more robust filtering in minibuffer."
+  (let* ((marker (get-text-property 0 'org-hd-marker line))
+         (level (get-text-property 0 'level line))
+         (file (propertize (org-with-point-at marker
+                             (file-name-nondirectory (buffer-file-name))) 'face 'success))
+         (path (when (> level 1)
+                 (propertize (org-with-point-at marker
+                               (mapconcat #'substring-no-properties (org-get-outline-path nil t) "/")) 'face '(shadow italic))))
+         (new (concat file (make-string (- 15 (length file)) ? )
+                      line (when path "     || ") path))
+         (props (text-properties-at 0 line)))
+    (org-add-props new props)))
+#+end_src
+
+This function takes the current headline, either at point or corresponding to the current entry, and formats it similarly to the above. This is used to provide a default value when the headline search is restricted to the current buffer.
+
+#+begin_src emacs-lisp
+(defun baal-org-ql--current-headline ()
+  "Format the current entry headline.
+Used as the default candidate when searching `current-buffer'."
+  (save-excursion
+    (when (derived-mode-p 'org-mode)
+      (unless (or (org-before-first-heading-p)
+                  (org-in-archived-heading-p))
+        (org-back-to-heading)
+        (baal-org-ql--format-element
+         (org-ql-view--format-element
+          (org-ql--add-markers
+           (org-element-headline-parser (line-end-position)))))))))
+#+end_src
+
+** Collecting candidates
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 08:57]
+:END:
+
+Collecting the potential headline candidates into a list that can be provided to a completing-read function is handled by the below function. The function is optionally passed two arguments from its caller. The first arg is a prefix argument which restricts the scope of this function by the following:
+
+- No prefix: show headlines in current buffer
+- C-u: show headlines from the current buffer and your org-agenda-files
+- M-3 or (C-u 3): show headlines from your org-agenda-files plus all open org files
+
+Secondly, the archive argument determines if I want to search archived headlines. I currently archive my headlines within the same file, thus I wanted to remove these headlines from standard queries.
+
+This function makes use of a few functions and a macro from [[https://github.com/magnars/dash.el][dash.el]], which is a very useful library and already required by =org-ql=.
+
+#+begin_src emacs-lisp
+(defun baal-org-ql--candidates (&optional arg archive)
+  "Collect headlines in all selected org files.
+ARG controls whether to search current buffer, open org buffers, and
+org-agenda-files.  Search headlines in ARCHIVE when non-nil."
+  (let* ((buf-name (buffer-file-name))
+         (base (buffer-base-buffer))
+         (-compare-fn #'file-equal-p)
+         (b (pcase arg
+              ('3 (org-files-list))
+              ('(4) (-uniq
+                     (append (org-agenda-files)
+                             (when (derived-mode-p 'org-mode)
+                               (list (or buf-name
+                                         (buffer-file-name base)))))))
+              (_ (or buf-name
+                     base)))))
+    (->> (org-ql-select b
+           (if archive
+               '(tags* "ARCHIVE")
+             ;; entries & files tagged with noql are not searched. TODO look into
+             ;; restricting search for only headlines with custom ids. (may be
+             ;; faster but obviously not as inclusive).
+             '(not (tags* "noql" "ARCHIVE")))
+           :action 'element-with-markers
+           ;; When searching current-buffer sort headlines by default
+           ;; buffer-order. Otherwise, sort by random order.
+           :sort (when arg '(random)))
+         (-map #'org-ql-view--format-element)
+         (-map #'baal-org-ql--format-element))))
+#+end_src
+
+** Visit Candidates
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 00:41]
+:END:
+
+The following function provides a minibuffer interface to search across org headlines and visit them upon selection. Running =baal-org-post-follow-hooks= then creates an indirect buffer. If the headline does not exist, an org-capture to my inbox is executed with the user input as the headline.
+
+#+begin_src emacs-lisp
+(defvar baal-org-ql-goto-heading-history nil)
+
+(defun baal-org-ql-goto-heading (&optional arg archive)
+  "Go to the location of a custom ID, selected interactively.
+ARG and ARCHIVE passed to `baal-org-ql--candidates'."
+  (interactive "P")
+  (let* ((prescient-sort-length-enable nil)
+         (buff (current-buffer))
+         (prompt (if archive "[GOTO] Archive: " "[GOTO] Headline: "))
+         (default (baal-org-ql--current-headline))
+         (entry
+          ;; standard completing-read configuration
+          ;;
+          ;; (completing-read prompt (baal-org-ql--candidates arg archive)
+          ;;                  nil nil nil baal-org-ql-goto-heading-history
+          ;;                  (unless arg default))
+          (selectrum-read prompt (baal-org-ql--candidates arg archive)
+                          :history baal-org-ql-goto-heading-history
+                          :default-candidate (unless arg default)
+                          :no-move-default-candidate t))
+         (marker (get-text-property 0 'org-hd-marker entry)))
+    (if marker
+        (progn
+          (org-goto-marker-or-bmk marker)
+          (baal-org-post-follow-hooks buff))
+      ;; org capture template I use is :
+      ;;
+      ;; ("i" "inbox" entry
+      ;;  (file "~/org/inbox.org")
+      ;;  "* %?\n:PROPERTIES:\n:CREATED: %U\n:END:\n%a\n\n%i")
+      (org-capture nil "i")
+      (insert entry))))
+
+#+end_src
+
+* Insert org-links
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 07:27]
+:END:
+
+Inserting org-links to any of my headlines is a simple as a single keybinding. It still allows for the same control over scope as the previous function (=current-buffer=, =org-agenda-files=, =org-files-list=).
+
+#+begin_src emacs-lisp
+(defun baal-org-ql-insert-link (&optional arg id)
+  "Go to the location of a custom ID, selected interactively.
+ARG passed to `baal-org-ql--candidates'."
+  (interactive "P")
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not an Org buffer: %s" (buffer-name)))
+  (let* ((prescient-sort-length-enable nil)
+         (cands (unless id (baal-org-ql--candidates arg)))
+         (entry (unless id (selectrum-read "[LINK] Headline: " cands :require-match t)))
+         (title (org-link-display-format
+                 (if id (org-with-point-at
+                            (org-id-find id t)
+                          (org-get-heading t t t))
+                   (get-text-property 0 'raw-value entry))))
+         (id (or id (get-text-property 0 'ID entry))))
+    (org-insert-link nil (format "id:%s" id) title)
+    (evil-insert 1)))
+#+end_src
+
+* Backlinks
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 00:42]
+:END:
+
+** Formatting backlinks
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 07:28]
+:END:
+
+Searching for backlinks defaults to search all my =org-agenda= as well as any extra files placed in =org-agenda-text-search-extra-files=.
+
+#+begin_src emacs-lisp
+(defun baal-org-ql--backlinks (id)
+  "Collect headlines that link to entry associated with ID."
+  (let ((b (append (org-agenda-files) org-agenda-text-search-extra-files))
+        (uuid (format "id:%s" id)))
+    (->> (org-ql-select b
+           `(and (link :target ,uuid)
+                 (not (tags "noid")))
+           :action 'element-with-markers)
+         (-map #'org-ql-view--format-element)
+         (-map #'baal-org-ql--format-element))))
+#+end_src
+
+** Visiting backlinks
+:PROPERTIES:
+:CREATED:  [2020-11-23 Mon 07:29]
+:END:
+
+I can visit backlinks in the same way I can with headlines. 
+
+#+begin_src emacs-lisp
+(defvar baal-org-goto-backlinks-history nil)
+
+(defun baal-org-ql-goto-backlink ()
+  "Go to the location of a custom ID that links to the current one."
+  (interactive)
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not an Org buffer: %s" (buffer-name)))
+  (let* ((buff (current-buffer))
+         (uuid (org-id-get))
+         (cands (baal-org-ql--backlinks uuid))
+         (entry (when cands
+                  ;; standard completing-read configuration
+                  ;; (completing-read "Links & Backlinks: "
+                  ;;                  cands nil t nil baal-org-goto-backlinks-history)
+                  (selectrum-read "Links & Backlinks: "
+                                  cands
+                                  :require-match t
+                                  :history baal-org-goto-backlinks-history)))
+         (marker (when entry (get-text-property 0 'org-hd-marker entry))))
+    (if marker
+        (progn
+          (org-goto-marker-or-bmk marker)
+          (baal-org-post-follow-hooks buff))
+      (user-error "No Backlinks!"))))
+#+end_src
+
+* Conclusion
+
+Hopefully this has helped to show just some of the things you can accomplish with =org-ql=.
