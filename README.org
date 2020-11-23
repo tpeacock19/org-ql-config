@@ -158,7 +158,7 @@ Adding file name and outline path for more robust filtering in minibuffer."
   (let* ((marker (get-text-property 0 'org-hd-marker line))
          (level (get-text-property 0 'level line))
          (file (propertize (org-with-point-at marker
-                             (file-name-nondirectory (buffer-file-name))) 'face 'success))
+                             (file-name-nondirectory (buffer-file-name (buffer-base-buffer)))) 'face 'success))
          (path (when (> level 1)
                  (propertize (org-with-point-at marker
                                (mapconcat #'substring-no-properties (org-get-outline-path nil t) "/")) 'face '(shadow italic))))
