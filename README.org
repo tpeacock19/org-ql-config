@@ -140,12 +140,16 @@ Additionally, QUERY can be chosen as well."
 :CREATED:  [2020-11-23 Mon 01:29]
 :END:
 
+This following functions are the backbone of my navigation between my org files. Unless I am in =org-agenda= or an =org-ql-view= I will use these to visit various headlines.
+
+[[images/2020-11-23-09:06:23_screenshot.png]]
+
 ** Formatting Candidates
 :PROPERTIES:
 :CREATED:  [2020-11-23 Mon 00:41]
 :END:
 
-Now we are getting to the interesting parts. This first function modifies org-ql's original formatting of entries for an org-ql-view. It prepend's the headline's file name and appends the headline's outline path. This allows you to view a good amount of information when searching for headlines in the minibuffer.
+This first function modifies org-ql's original formatting of entries for an org-ql-view. It prepend's the headline's file name and appends the headline's outline path. This allows you to view a good amount of information when searching for headlines in the minibuffer.
 
 #+begin_src emacs-lisp
 (defun baal-org-ql--format-element (line)
