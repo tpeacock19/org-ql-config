@@ -1,6 +1,13 @@
 #+title: Org-ql Config
 #+PROPERTY: header-args :tangle no
 
+* Updates
+:PROPERTIES:
+:CREATED:  [2021-01-27 Wed 15:12]
+:END:
+
+I've recently updated this org-ql configuration to reflect a shift away from using text properties and relying on alists instead. The functionality should remain the same, but this allowed for a better integration with [[https://github.com/oantolin/embark][embark]].
+
 * Introduction
 :PROPERTIES:
 :CREATED:  [2020-11-23 Mon 00:42]
@@ -23,6 +30,7 @@ As mentioned earlier this configuration is mainly built off of `org-ql`; However
 ;; optional
 (require 'selectrum)
 (require 'prescient)
+(require 'a)
 #+end_src
 
 * Indirect Buffers
@@ -32,7 +40,7 @@ As mentioned earlier this configuration is mainly built off of `org-ql`; However
 
 I borrowed yet another function from alphapapa in his simpler =org-tree-to-indirect-buffer=. However, I slightly modified it to better title buffers that are created from headlines that include org-links.
 
-#+begin_src emacs-lisp :tangle yes
+#+begin_src emacs-lisp
 (defun ap/org-tree-to-indirect-buffer (&optional arg)
     "Create indirect buffer and narrow it to current subtree.
 The buffer is named after the subtree heading, with the filename
@@ -158,12 +166,13 @@ Adding file name and outline path for more robust filtering in minibuffer."
   (let* ((marker (get-text-property 0 'org-hd-marker line))
          (level (get-text-property 0 'level line))
          (file (propertize (org-with-point-at marker
-                             (file-name-nondirectory (buffer-file-name (buffer-base-buffer)))) 'face 'success))
+                             (or (file-name-nondirectory (buffer-file-name (buffer-base-buffer))))) 'face 'success))
          (path (when (> level 1)
                  (propertize (org-with-point-at marker
-                               (mapconcat #'substring-no-properties (org-get-outline-path nil t) "/")) 'face '(shadow italic))))
-         (new (concat file (make-string (- 15 (length file)) ? )
-                      line (when path "     || ") path))
+                               (mapconcat #'substring-no-properties (org-get-outline-path nil t) "/")) 'face 'completions-annotations)))
+         (new (concat file ":" (make-string (- 15 (length file)) ? )
+                      line (when path "\t\t\t || ")
+                      path))
          (props (text-properties-at 0 line)))
     (org-add-props new props)))
 #+end_src
@@ -216,20 +225,25 @@ org-agenda-files.  Search headlines in ARCHIVE when non-nil."
                                (list (or buf-name
                                          (buffer-file-name base)))))))
               (_ (or buf-name
-                     base)))))
-    (->> (org-ql-select b
-           (if archive
-               '(tags* "ARCHIVE")
-             ;; entries & files tagged with noql are not searched. TODO look into
-             ;; restricting search for only headlines with custom ids. (may be
-             ;; faster but obviously not as inclusive).
-             '(not (tags* "noql" "ARCHIVE")))
-           :action 'element-with-markers
-           ;; When searching current-buffer sort headlines by default
-           ;; buffer-order. Otherwise, sort by random order.
-           :sort (when arg '(random)))
-         (-map #'org-ql-view--format-element)
-         (-map #'baal-org-ql--format-element))))
+                     base))))
+         (cands (->> (org-ql-select b
+                       (if archive
+                           '(tags "ARCHIVE")
+                         ;; entries & files tagged with noql are not searched. TODO
+                         ;; look into restricting search for only headlines with
+                         ;; custom ids. (may be faster but obviously not as inclusive).
+                         '(not (tags "noql" "ARCHIVE")))
+                       :action 'element-with-markers
+                       ;; When searching current-buffer sort headlines by default
+                       ;; buffer-order. Otherwise, sort by random order.
+                       :sort (when arg '(random)))
+                     (--map (baal-org-ql--format-element
+                             (org-ql-view--format-element it))))))
+    (cl-loop for cand being the elements of cands
+             for id = (get-text-property 0 'ID cand)
+             for mark = (get-text-property 0 'org-hd-marker cand)
+             for title = (get-text-property 0 'raw-value cand)
+             collect (cons cand (a-list :id id :mark mark :title title)))))
 #+end_src
 
 ** Visit Candidates
@@ -250,29 +264,25 @@ ARG and ARCHIVE passed to `baal-org-ql--candidates'."
          (buff (current-buffer))
          (prompt (if archive "[GOTO] Archive: " "[GOTO] Headline: "))
          (default (baal-org-ql--current-headline))
+         (cands (baal-org-ql--candidates arg archive))
          (entry
           ;; standard completing-read configuration
           ;;
-          ;; (completing-read prompt (baal-org-ql--candidates arg archive)
+          ;; (completing-read prompt cands
           ;;                  nil nil nil baal-org-ql-goto-heading-history
           ;;                  (unless arg default))
-          (selectrum-read prompt (baal-org-ql--candidates arg archive)
+          (selectrum-read prompt nil
+                          :minibuffer-completion-table cands
                           :history baal-org-ql-goto-heading-history
                           :default-candidate (unless arg default)
                           :no-move-default-candidate t))
-         (marker (get-text-property 0 'org-hd-marker entry)))
+         (marker (a-get (cdr (assoc-string entry cands)) :mark)))
     (if marker
         (progn
           (org-goto-marker-or-bmk marker)
           (baal-org-post-follow-hooks buff))
-      ;; org capture template I use is :
-      ;;
-      ;; ("i" "inbox" entry
-      ;;  (file "~/org/inbox.org")
-      ;;  "* %?\n:PROPERTIES:\n:CREATED: %U\n:END:\n%a\n\n%i")
       (org-capture nil "i")
       (insert entry))))
-
 #+end_src
 
 * Insert org-links
@@ -285,19 +295,24 @@ Inserting org-links to any of my headlines is a simple as a single keybinding. I
 #+begin_src emacs-lisp
 (defun baal-org-ql-insert-link (&optional arg id)
   "Go to the location of a custom ID, selected interactively.
-ARG passed to `baal-org-ql--candidates'."
+ARG passed to `baal:org-global-custom-ids'."
   (interactive "P")
   (unless (derived-mode-p 'org-mode)
     (user-error "Not an Org buffer: %s" (buffer-name)))
   (let* ((prescient-sort-length-enable nil)
-         (cands (unless id (baal-org-ql--candidates arg)))
-         (entry (unless id (selectrum-read "[LINK] Headline: " cands :require-match t)))
+         (cands (unless id
+                  (baal-org-ql--candidates arg)))
+         (entry (unless id
+                  (selectrum-read "[LINK] Headline: " nil
+                                  :require-match t
+                                  :minibuffer-completion-table cands)))
          (title (org-link-display-format
                  (if id (org-with-point-at
                             (org-id-find id t)
                           (org-get-heading t t t))
-                   (get-text-property 0 'raw-value entry))))
-         (id (or id (get-text-property 0 'ID entry))))
+                   (a-get (cdr (assoc-string entry (baal-org-ql--candidates))) :title))))
+         (id (or id
+                 (a-get (cdr (assoc-string entry cands)) :id))))
     (org-insert-link nil (format "id:%s" id) title)
     (evil-insert 1)))
 #+end_src
@@ -317,14 +332,19 @@ Searching for backlinks defaults to search all my =org-agenda= as well as any ex
 #+begin_src emacs-lisp
 (defun baal-org-ql--backlinks (id)
   "Collect headlines that link to entry associated with ID."
-  (let ((b (append (org-agenda-files) org-agenda-text-search-extra-files))
-        (uuid (format "id:%s" id)))
-    (->> (org-ql-select b
-           `(and (link :target ,uuid)
-                 (not (tags "noid")))
-           :action 'element-with-markers)
-         (-map #'org-ql-view--format-element)
-         (-map #'baal-org-ql--format-element))))
+  (let* ((b (append (org-agenda-files) org-agenda-text-search-extra-files))
+         (uuid (format "id:%s" id))
+         (cands (->> (org-ql-select b
+                       `(and (link :target ,uuid)
+                             (not (tags "noid")))
+                       :action 'element-with-markers)
+                     (-map #'org-ql-view--format-element)
+                     (-map #'baal-org-ql--format-element))))
+    (cl-loop for cand being the elements of cands
+             for ident = (get-text-property 0 'ID cand)
+             for mark = (get-text-property 0 'org-hd-marker cand)
+             for title = (get-text-property 0 'raw-value cand)
+             collect (cons cand (a-list :id id :mark mark :title title)))))
 #+end_src
 
 ** Visiting backlinks
@@ -337,28 +357,31 @@ I can visit backlinks in the same way I can with headlines.
 #+begin_src emacs-lisp
 (defvar baal-org-goto-backlinks-history nil)
 
-(defun baal-org-ql-goto-backlink ()
+(defun baal-org-ql-goto-backlink (&optional arg)
   "Go to the location of a custom ID that links to the current one."
-  (interactive)
+  (interactive "P")
   (unless (derived-mode-p 'org-mode)
     (user-error "Not an Org buffer: %s" (buffer-name)))
-  (let* ((buff (current-buffer))
-         (uuid (org-id-get))
-         (cands (baal-org-ql--backlinks uuid))
-         (entry (when cands
-                  ;; standard completing-read configuration
-                  ;; (completing-read "Links & Backlinks: "
-                  ;;                  cands nil t nil baal-org-goto-backlinks-history)
-                  (selectrum-read "Links & Backlinks: "
-                                  cands
-                                  :require-match t
-                                  :history baal-org-goto-backlinks-history)))
-         (marker (when entry (get-text-property 0 'org-hd-marker entry))))
-    (if marker
-        (progn
-          (org-goto-marker-or-bmk marker)
-          (baal-org-post-follow-hooks buff))
-      (user-error "No Backlinks!"))))
+  (if arg
+      (funcall #'org-sidebar-backlinks)
+    (let* ((buff (current-buffer))
+           (uuid (org-id-get))
+           (cands (baal-org-ql--backlinks uuid))
+           (entry (when cands
+                    ;; standard completing-read configuration
+                    ;; (completing-read "Links & Backlinks: "
+                    ;;                  cands nil t nil baal-org-goto-backlinks-history)
+                    (selectrum-read "Links & Backlinks: "
+                                    nil
+                                    :minibuffer-completion-table cands
+                                    :require-match t
+                                    :history baal-org-goto-backlinks-history)))
+           (marker (when entry (get-text-property 0 'org-hd-marker entry))))
+      (if marker
+          (progn
+            (org-goto-marker-or-bmk marker)
+            (baal-org-post-follow-hooks buff))
+        (user-error "No Backlinks!")))))
 #+end_src
 
 * Conclusion
